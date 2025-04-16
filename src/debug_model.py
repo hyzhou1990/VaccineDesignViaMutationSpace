@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def setup_parser():
     parser = argparse.ArgumentParser(description='Debug and analyze protein diffusion model')
-    parser.add_argument('--data_path', type=str, default='../data/test_sequences.txt', help='Path to test data')
+    parser.add_argument('--data_path', type=str, default='data/test_sequences.txt', help='Path to test data')
     parser.add_argument('--seq_length', type=int, default=500, help='Maximum sequence length')
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
     parser.add_argument('--num_layers', type=int, default=4, help='Number of transformer layers')
@@ -29,8 +29,8 @@ def setup_parser():
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
     parser.add_argument('--mode', type=str, choices=['train', 'generate', 'analyze'], default='train', help='Mode')
-    parser.add_argument('--checkpoint_path', type=str, default='../models/debug_checkpoint.pt', help='Path to checkpoint')
-    parser.add_argument('--output_path', type=str, default='../results/debug_generated.txt', help='Path to save outputs')
+    parser.add_argument('--checkpoint_path', type=str, default='models/debug_checkpoint.pt', help='Path to checkpoint')
+    parser.add_argument('--output_path', type=str, default='results/debug_generated.txt', help='Path to save outputs')
     parser.add_argument('--num_sequences', type=int, default=5, help='Number of sequences to generate')
     
     return parser
@@ -143,7 +143,7 @@ def visualize_aa_distribution(aa_freqs, save_path):
     plt.savefig(save_path)
     plt.close()
 
-def custom_train_with_logging(model, diffusion, dataloader, optimizer, device, num_epochs=5, save_dir='../models'):
+def custom_train_with_logging(model, diffusion, dataloader, optimizer, device, num_epochs=5, save_dir='models'):
     """带有详细日志记录的训练函数"""
     model.train()
     os.makedirs(save_dir, exist_ok=True)
@@ -156,8 +156,8 @@ def custom_train_with_logging(model, diffusion, dataloader, optimizer, device, n
         pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{num_epochs}')
         
         for batch in pbar:
-            # 移动数据到设备
-            batch = batch.to(device)
+            # 移动数据到设备并转换为浮点类型
+            batch = batch.float().to(device)
             
             # 采样时间步
             t = torch.randint(0, diffusion.num_timesteps, (batch.size(0),), device=device)
@@ -231,7 +231,7 @@ def main():
             num_heads=args.num_heads
         ).to(args.device)
         
-        diffusion = DiffusionProcess(num_timesteps=500)  # 减少时间步以加快调试
+        diffusion = DiffusionProcess(num_timesteps=500, device=args.device)  # 减少时间步以加快调试，并传递设备参数
         
         # 初始化优化器
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -248,7 +248,7 @@ def main():
         )
         
         # 可视化训练损失
-        visualize_loss(loss_history, os.path.join('../results', 'training_loss.png'))
+        visualize_loss(loss_history, os.path.join('results', 'training_loss.png'))
         logger.info(f"Training completed. Model saved to {args.checkpoint_path}")
         
     elif args.mode == 'generate':
@@ -262,7 +262,7 @@ def main():
             args.device
         )
         
-        diffusion = DiffusionProcess(num_timesteps=500)  # 减少时间步以加快调试
+        diffusion = DiffusionProcess(num_timesteps=500, device=args.device)  # 减少时间步以加快调试，并传递设备参数
         
         # 生成序列
         generated_sequences = generate_sequences(

@@ -30,13 +30,13 @@ class ProteinDiffusionModel(nn.Module):
     ):
         super().__init__()
         
-        # Amino acid embedding
-        self.aa_embedding = nn.Embedding(21, hidden_dim)  # 20 amino acids + padding
+        # 特征嵌入（改为连续空间）
+        self.feature_layer = nn.Linear(1, hidden_dim)
         
-        # Position embeddings
+        # 位置嵌入
         self.pos_embedding = nn.Parameter(torch.randn(1, seq_length, hidden_dim))
         
-        # Time embeddings
+        # 时间嵌入
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
@@ -44,7 +44,7 @@ class ProteinDiffusionModel(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         
-        # Transformer encoder
+        # Transformer编码器
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -55,8 +55,8 @@ class ProteinDiffusionModel(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Output layer
-        self.output_layer = nn.Linear(hidden_dim, 21)  # Predict amino acid probabilities
+        # 输出层
+        self.output_layer = nn.Linear(hidden_dim, 1)
         
     def forward(
         self,
@@ -66,44 +66,49 @@ class ProteinDiffusionModel(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x: Input sequence tensor of shape [batch_size, seq_length]
-            t: Time step tensor of shape [batch_size]
-            mask: Optional attention mask of shape [batch_size, seq_length]
+            x: 输入序列张量，形状为 [batch_size, seq_length]
+            t: 时间步张量，形状为 [batch_size]
+            mask: 可选的注意力掩码，形状为 [batch_size, seq_length]
         Returns:
-            Predicted noise of shape [batch_size, seq_length, 21]
+            预测噪声，形状为 [batch_size, seq_length]
         """
-        # Embed amino acids
-        x = self.aa_embedding(x)  # [batch_size, seq_length, hidden_dim]
+        # 确保x是浮点类型并增加通道维度
+        x = x.float().unsqueeze(-1)  # [batch_size, seq_length, 1]
         
-        # Add position embeddings
+        # 嵌入特征
+        x = self.feature_layer(x)  # [batch_size, seq_length, hidden_dim]
+        
+        # 添加位置嵌入
         x = x + self.pos_embedding
         
-        # Add time embeddings
+        # 添加时间嵌入
         t_emb = self.time_mlp(t)  # [batch_size, hidden_dim]
-        x = x + t_emb.unsqueeze(1)  # Broadcast time embeddings across sequence
+        x = x + t_emb.unsqueeze(1)  # 时间嵌入广播到序列维度
         
-        # Transformer encoding
+        # Transformer编码
         if mask is not None:
             x = self.transformer(x, src_key_padding_mask=mask)
         else:
             x = self.transformer(x)
         
-        # Output layer
-        x = self.output_layer(x)  # [batch_size, seq_length, 21]
+        # 输出层
+        x = self.output_layer(x)  # [batch_size, seq_length, 1]
         
-        return x
+        return x.squeeze(-1)  # [batch_size, seq_length]
 
 class DiffusionProcess:
     def __init__(
         self,
         num_timesteps: int = 1000,
         beta_start: float = 0.0001,
-        beta_end: float = 0.02
+        beta_end: float = 0.02,
+        device: str = 'cpu'
     ):
         self.num_timesteps = num_timesteps
+        self.device = device
         
-        # Linear noise schedule
-        self.betas = torch.linspace(beta_start, beta_end, num_timesteps)
+        # 线性噪声调度
+        self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1. - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         
@@ -114,13 +119,24 @@ class DiffusionProcess:
         noise: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Sample from q(x_t | x_0)
+        从q(x_t | x_0)采样
         """
+        device = x_start.device
         if noise is None:
             noise = torch.randn_like(x_start)
             
+        # 确保t在正确的设备上
+        if t.device != self.betas.device:
+            t = t.to(self.betas.device)
+            
         alphas_cumprod_t = self.alphas_cumprod[t]
-        alphas_cumprod_t = alphas_cumprod_t.unsqueeze(-1).unsqueeze(-1)
+        
+        # 处理维度以便广播
+        if x_start.dim() > 1:
+            alphas_cumprod_t = alphas_cumprod_t.view(-1, *([1] * (x_start.dim() - 1)))
+        
+        # 确保设备一致
+        alphas_cumprod_t = alphas_cumprod_t.to(device)
         
         x_t = torch.sqrt(alphas_cumprod_t) * x_start + \
               torch.sqrt(1. - alphas_cumprod_t) * noise
@@ -135,26 +151,41 @@ class DiffusionProcess:
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Sample from p(x_{t-1} | x_t)
+        从p(x_{t-1} | x_t)采样
         """
+        device = x_t.device
+        
         with torch.no_grad():
-            # Predict noise
+            # 确保t在正确的设备上
+            if t.device != self.betas.device:
+                t = t.to(self.betas.device)
+                
+            # 预测噪声
             pred_noise = model(x_t, t, mask)
             
-            # Calculate mean and variance
+            # 计算均值和方差
             alphas_t = self.alphas[t]
             alphas_cumprod_t = self.alphas_cumprod[t]
             
-            alphas_t = alphas_t.unsqueeze(-1).unsqueeze(-1)
-            alphas_cumprod_t = alphas_cumprod_t.unsqueeze(-1).unsqueeze(-1)
+            # 处理维度以便广播
+            if x_t.dim() > 1:
+                alphas_t = alphas_t.view(-1, *([1] * (x_t.dim() - 1)))
+                alphas_cumprod_t = alphas_cumprod_t.view(-1, *([1] * (x_t.dim() - 1)))
+                betas_t = self.betas[t].view(-1, *([1] * (x_t.dim() - 1)))
+            else:
+                betas_t = self.betas[t]
+            
+            # 确保设备一致
+            alphas_t = alphas_t.to(device)
+            alphas_cumprod_t = alphas_cumprod_t.to(device)
+            betas_t = betas_t.to(device)
             
             mean = (1. / torch.sqrt(alphas_t)) * \
-                   (x_t - (self.betas[t].unsqueeze(-1).unsqueeze(-1) / \
-                    torch.sqrt(1. - alphas_cumprod_t)) * pred_noise)
+                   (x_t - (betas_t / torch.sqrt(1. - alphas_cumprod_t)) * pred_noise)
             
-            # Sample from N(mean, beta)
+            # 从N(mean, beta)采样
             noise = torch.randn_like(x_t)
-            x_t_minus_1 = mean + torch.sqrt(self.betas[t].unsqueeze(-1).unsqueeze(-1)) * noise
+            x_t_minus_1 = mean + torch.sqrt(betas_t) * noise
             
             return x_t_minus_1
     
@@ -165,7 +196,7 @@ class DiffusionProcess:
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Generate samples by running the reverse process
+        通过运行逆向过程生成样本
         """
         device = next(model.parameters()).device
         x = torch.randn(shape, device=device)

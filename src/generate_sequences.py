@@ -26,46 +26,55 @@ def generate_sequences(
     device,
     temperature=1.0
 ):
-    # Generate random noise
+    # 生成随机噪声
     x = torch.randn((num_sequences, seq_length), device=device)
     
-    # Generate sequences
-    sequences = diffusion.p_sample_loop(model, (num_sequences, seq_length))
+    # 生成序列
+    with torch.no_grad():
+        sequences = diffusion.p_sample_loop(model, (num_sequences, seq_length))
     
-    # Convert to amino acid sequences
+    # 将连续值转换为氨基酸索引
+    # 我们将连续空间映射到20种氨基酸，简单起见，使用均匀区间
+    bins = np.linspace(-2, 2, 21)  # 20个氨基酸+1个边界
+    
     idx_to_aa = {
         0: 'A', 1: 'R', 2: 'N', 3: 'D', 4: 'C',
         5: 'Q', 6: 'E', 7: 'G', 8: 'H', 9: 'I',
         10: 'L', 11: 'K', 12: 'M', 13: 'F', 14: 'P',
         15: 'S', 16: 'T', 17: 'W', 18: 'Y', 19: 'V',
-        20: '-'  # Padding token
+        20: '-'  # 填充符号
     }
     
     generated_sequences = []
     for seq in sequences:
-        # Convert indices to amino acids
-        aa_seq = ''.join([idx_to_aa[idx.item()] for idx in seq])
-        # Remove padding
+        # 将连续值数字化为氨基酸索引
+        seq_np = seq.cpu().numpy()
+        idx_seq = np.digitize(seq_np, bins) - 1  # -1 是因为digitize给出的是右边界的索引
+        idx_seq = np.clip(idx_seq, 0, 20)  # 确保所有索引在有效范围内
+        
+        # 转换索引为氨基酸
+        aa_seq = ''.join([idx_to_aa[idx] for idx in idx_seq])
+        # 移除填充
         aa_seq = aa_seq.rstrip('-')
         generated_sequences.append(aa_seq)
     
     return generated_sequences
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate protein sequences using diffusion model')
-    parser.add_argument('--checkpoint_path', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--num_sequences', type=int, default=10, help='Number of sequences to generate')
-    parser.add_argument('--seq_length', type=int, default=1000, help='Sequence length')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension')
-    parser.add_argument('--num_layers', type=int, default=6, help='Number of transformer layers')
-    parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature')
-    parser.add_argument('--output_path', type=str, default='generated_sequences.txt', help='Path to save generated sequences')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device to use')
+    parser = argparse.ArgumentParser(description='使用扩散模型生成蛋白质序列')
+    parser.add_argument('--checkpoint_path', type=str, required=True, help='模型检查点路径')
+    parser.add_argument('--num_sequences', type=int, default=10, help='生成序列数量')
+    parser.add_argument('--seq_length', type=int, default=1000, help='序列长度')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='隐藏维度')
+    parser.add_argument('--num_layers', type=int, default=6, help='Transformer层数')
+    parser.add_argument('--num_heads', type=int, default=8, help='注意力头数')
+    parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
+    parser.add_argument('--output_path', type=str, default='generated_sequences.txt', help='保存生成序列的路径')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='使用设备')
     
     args = parser.parse_args()
     
-    # Load model
+    # 加载模型
     model = load_model(
         args.checkpoint_path,
         args.seq_length,
@@ -75,10 +84,10 @@ def main():
         args.device
     )
     
-    # Initialize diffusion process
-    diffusion = DiffusionProcess()
+    # 初始化扩散过程
+    diffusion = DiffusionProcess(device=args.device)
     
-    # Generate sequences
+    # 生成序列
     generated_sequences = generate_sequences(
         model,
         diffusion,
@@ -88,13 +97,13 @@ def main():
         args.temperature
     )
     
-    # Save sequences
+    # 保存序列
     with open(args.output_path, 'w') as f:
         for i, seq in enumerate(generated_sequences):
             f.write(f'>Generated_sequence_{i+1}\n')
             f.write(f'{seq}\n')
     
-    print(f'Generated {len(generated_sequences)} sequences and saved to {args.output_path}')
+    print(f'生成了 {len(generated_sequences)} 个序列并保存到 {args.output_path}')
 
 if __name__ == '__main__':
     main() 
